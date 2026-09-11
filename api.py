@@ -2,6 +2,27 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 
 from agent import ApartmentAgent
+from database import (
+    create_database,
+    add_test_apartments,
+    update_complex_images
+)
+
+
+app = FastAPI(
+    title="AI-агент по подбору квартир",
+    description="API для поиска и сравнения квартир",
+    version="1.0.0"
+)
+
+create_database()
+add_test_apartments()
+update_complex_images()
+
+
+# Храним отдельного агента для каждого пользователя.
+# Благодаря этому каждый пользователь сохраняет свой контекст диалога.
+agents = {}
 
 
 app = FastAPI(
