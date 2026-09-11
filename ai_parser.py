@@ -516,7 +516,7 @@ def parse_complex_selection(user_text, complexes):
     if not complexes:
         return []
 
-# Если пользователь явно указал номера ЖК, обрабатываем их без GigaChat.
+    # Если пользователь явно указал номера ЖК, обрабатываем их без GigaChat.
     numeric_matches = re.findall(
         r"\bжк\s*№?\s*(\d+)\b",
         user_text.lower()

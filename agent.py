@@ -1293,15 +1293,10 @@ class ApartmentAgent:
 
         if is_complex_reference_request(user_text):
 
-            print("DEBUG last_complexes:", self.last_complexes)
-            print("DEBUG user_text:", user_text)
-
             selected_ids = parse_complex_selection(
                 user_text,
                 self.last_complexes
             )
-
-            print("DEBUG selected_ids:", selected_ids)
 
             if selected_ids:
 
