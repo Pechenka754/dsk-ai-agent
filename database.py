@@ -3,6 +3,9 @@ import sqlite3
 
 DB_NAME = "apartments.db"
 
+FREE_BOOKING_HOURS = 3
+PAID_BOOKING_MONTHS = 1
+PAID_BOOKING_PRICE = 20_000
 
 def get_connection():
     """Создаёт подключение к базе данных."""
@@ -25,9 +28,20 @@ def create_database():
             completion_year INTEGER,
             description TEXT,
             infrastructure TEXT,
-            parking TEXT
+            parking TEXT,
+            image TEXT
         )
     """)
+
+    # Если таблица уже существовала без image, добавляем колонку безопасно
+    cursor.execute("PRAGMA table_info(residential_complexes)")
+    columns = [row[1] for row in cursor.fetchall()]
+
+    if "image" not in columns:
+        cursor.execute("""
+            ALTER TABLE residential_complexes
+            ADD COLUMN image TEXT
+        """)
 
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS apartments (
@@ -46,6 +60,32 @@ def create_database():
             FOREIGN KEY (complex_id) REFERENCES residential_complexes(id)
         )
     """)
+
+    connection.commit()
+    connection.close()
+
+    update_complex_images()
+
+
+def update_complex_images():
+    connection = get_connection()
+    cursor = connection.cursor()
+
+    complex_images = {
+        1: "images/complexes/complex_1_ЖК_Солнечный.jpg",
+        2: "images/complexes/complex_2_ЖК_Речной.jpg",
+        3: "images/complexes/complex_3_ЖК_Северный.jpg",
+        4: "images/complexes/complex_4_ЖК_Центральный.jpg",
+        5: "images/complexes/complex_5_ЖК_Парковый.jpg",
+        6: "images/complexes/complex_7_ЖК_Новый_город.jpg",
+        7: "images/complexes/complex_6_ЖК_Лесной.jpg"
+    }
+    for complex_id, image_path in complex_images.items():
+        cursor.execute("""
+            UPDATE residential_complexes
+            SET image = ?
+            WHERE id = ?
+        """, (image_path, complex_id))
 
     connection.commit()
     connection.close()
@@ -278,8 +318,72 @@ def add_test_apartments():
     connection.close()
 
 
+def release_expired_bookings():
+    """
+    Освобождает квартиры, у которых закончился срок бронирования.
+    """
+
+    connection = get_connection()
+    cursor = connection.cursor()
+
+    cursor.execute("""
+        UPDATE apartments
+        SET
+            booking_status = 'available',
+            booking_type = NULL,
+            booking_until = NULL
+        WHERE
+            booking_status = 'booked'
+            AND booking_until IS NOT NULL
+            AND datetime(booking_until) <= datetime('now')
+    """)
+
+    released_count = cursor.rowcount
+
+    connection.commit()
+    connection.close()
+
+    return released_count
+
+
+def get_apartment_by_id(apartment_id):
+    """Возвращает квартиру по ID."""
+
+    connection = get_connection()
+    cursor = connection.cursor()
+
+    cursor.execute("""
+        SELECT
+            id,
+            complex_id,
+            rooms,
+            area,
+            price,
+            floor,
+            finishing,
+            balcony,
+            image,
+            booking_status,
+            booking_type,
+            booking_until
+        FROM apartments
+        WHERE id = ?
+    """, (apartment_id,))
+
+    apartment = cursor.fetchone()
+
+    connection.close()
+
+    if apartment is None:
+        return None
+
+    return tuple(apartment)
+
+
 def get_all_apartments():
     """Возвращает все доступные квартиры."""
+
+    release_expired_bookings()
 
     connection = get_connection()
     cursor = connection.cursor()
@@ -321,6 +425,8 @@ def search_apartments(filters):
     max_price
     max_floor
     """
+
+    release_expired_bookings()
 
     query = """
         SELECT
@@ -508,6 +614,8 @@ def get_complexes_for_filters(filters):
     соответствующие фильтрам.
     """
 
+    release_expired_bookings()
+
     query = """
         SELECT
             rc.id,
@@ -518,6 +626,7 @@ def get_complexes_for_filters(filters):
             rc.description,
             rc.infrastructure,
             rc.parking,
+            rc.image,
             COUNT(a.id) AS apartment_count
         FROM residential_complexes rc
         JOIN apartments a
@@ -562,7 +671,8 @@ def get_complexes_for_filters(filters):
             rc.completion_year,
             rc.description,
             rc.infrastructure,
-            rc.parking
+            rc.parking,
+            rc.image
         ORDER BY rc.id
     """
 
@@ -599,7 +709,8 @@ def get_complexes_by_ids(complex_ids):
             completion_year,
             description,
             infrastructure,
-            parking
+            parking,
+            image
         FROM residential_complexes
         WHERE id IN ({placeholders})
         ORDER BY id
@@ -636,7 +747,8 @@ def get_complex_by_name(name):
             completion_year,
             description,
             infrastructure,
-            parking
+            parking,
+            image
         FROM residential_complexes
         WHERE LOWER(name) = LOWER(?)
            OR LOWER(name) LIKE LOWER(?)
@@ -668,7 +780,8 @@ def get_complex_by_id(complex_id):
             completion_year,
             description,
             infrastructure,
-            parking
+            parking,
+            image
         FROM residential_complexes
         WHERE id = ?
     """, (complex_id,))
@@ -698,7 +811,8 @@ def get_all_complexes():
             completion_year,
             description,
             infrastructure,
-            parking
+            parking,
+            image
         FROM residential_complexes
         ORDER BY id
     """)
@@ -710,7 +824,115 @@ def get_all_complexes():
     return [tuple(row) for row in complexes]
 
 
+def book_apartment(apartment_id, booking_type):
+    """
+    Бронирует квартиру, если она свободна.
+
+    free — бесплатная бронь на 3 часа.
+    paid — платная бронь на 1 месяц.
+    """
+
+    if booking_type not in ("free", "paid"):
+        return {
+            "success": False,
+            "message": "Неизвестный тип бронирования."
+        }
+
+    connection = get_connection()
+    cursor = connection.cursor()
+
+    # Сначала освобождаем квартиры,
+    # у которых закончился срок бронирования.
+    cursor.execute("""
+        UPDATE apartments
+        SET
+            booking_status = 'available',
+            booking_type = NULL,
+            booking_until = NULL
+        WHERE
+            booking_status = 'booked'
+            AND booking_until IS NOT NULL
+            AND datetime(booking_until) <= datetime('now')
+    """)
+
+    # Проверяем квартиру
+    cursor.execute("""
+        SELECT
+            id,
+            booking_status
+        FROM apartments
+        WHERE id = ?
+    """, (apartment_id,))
+
+    apartment = cursor.fetchone()
+
+    if apartment is None:
+        connection.close()
+
+        return {
+            "success": False,
+            "message": "Квартира не найдена."
+        }
+
+    if apartment["booking_status"] != "available":
+        connection.close()
+
+        return {
+            "success": False,
+            "message": "Эта квартира уже забронирована."
+        }
+
+    # Выбираем срок бронирования
+    if booking_type == "free":
+        booking_until_sql = "datetime('now', '+3 hours')"
+    else:
+        booking_until_sql = "datetime('now', '+1 month')"
+
+    cursor.execute(f"""
+        UPDATE apartments
+        SET
+            booking_status = 'booked',
+            booking_type = ?,
+            booking_until = {booking_until_sql}
+        WHERE id = ?
+    """, (booking_type, apartment_id))
+
+    connection.commit()
+
+    # Получаем установленный срок бронирования
+    cursor.execute("""
+        SELECT
+            booking_status,
+            booking_type,
+            booking_until
+        FROM apartments
+        WHERE id = ?
+    """, (apartment_id,))
+
+    booking = cursor.fetchone()
+
+    connection.close()
+
+    return {
+        "success": True,
+        "apartment_id": apartment_id,
+        "booking_type": booking["booking_type"],
+        "booking_until": booking["booking_until"],
+        "price": (
+            0
+            if booking_type == "free"
+            else PAID_BOOKING_PRICE
+        ),
+        "message": (
+            "Квартира забронирована бесплатно на 3 часа."
+            if booking_type == "free"
+            else "Квартира забронирована на 1 месяц."
+        )
+    }
+
+
 if __name__ == "__main__":
     create_database()
     add_test_apartments()
+    update_complex_images()
     print("База данных успешно создана и заполнена.")

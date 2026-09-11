@@ -18,8 +18,32 @@ from database import (
     search_nearest_apartments,
     get_complexes_for_filters,
     get_complexes_by_ids,
-    get_complex_by_id
+    get_complex_by_id,
+    get_all_complexes,
+    get_apartment_by_id,
+    book_apartment
 )
+
+
+ERROR_MESSAGES = {
+    "EMPTY_MESSAGE": "Пустой запрос.",
+    "INVALID_REQUEST": "Не удалось обработать запрос.",
+    "APARTMENT_NOT_FOUND": "Не удалось найти указанную квартиру.",
+    "COMPLEX_NOT_FOUND": "Не удалось найти указанный жилой комплекс.",
+    "BOOKING_UNAVAILABLE": "Эта квартира сейчас недоступна для бронирования.",
+    "INVALID_BOOKING_TYPE": "Не удалось определить тип бронирования.",
+    "INTERNAL_ERROR": "Произошла внутренняя ошибка. Попробуйте ещё раз."
+}
+
+
+def make_error(error_code, message=None):
+    """Создаёт единый ответ об ошибке для API."""
+
+    return {
+        "type": "error",
+        "error_code": error_code,
+        "message": message or ERROR_MESSAGES[error_code]
+    }
 
 
 class ApartmentAgent:
@@ -57,9 +81,14 @@ class ApartmentAgent:
         # Последний выбранный ЖК
         self.last_selected_complex_id = None
 
-        # Тип последнего списка:
-        # "apartment" или "complex"
+        # Тип последнего списка: "apartment" или "complex"
         self.last_context_type = None
+
+        # Квартира, для которой пользователь начал бронирование
+        self.pending_booking_apartment = None
+
+        # Ожидаемое действие при бронировании: "type" — пользователь должен выбрать тип брони; "payment" — пользователь должен подтвердить оплату
+        self.booking_step = None
 
     # --------------------------------------------------
     # Служебные функции
@@ -193,10 +222,10 @@ class ApartmentAgent:
         )
 
         if not recommendation:
-            return {
-                "type": "error",
-                "message": "Не удалось определить рекомендуемый вариант."
-            }
+            return make_error(
+                "INTERNAL_ERROR",
+                "Не удалось определить рекомендуемый вариант."
+            )
 
         apartment_id = recommendation["apartment_id"]
 
@@ -210,10 +239,10 @@ class ApartmentAgent:
         )
 
         if not apartment:
-            return {
-                "type": "error",
-                "message": "Не удалось найти рекомендуемую квартиру."
-            }
+            return make_error(
+                "APARTMENT_NOT_FOUND",
+                "Не удалось найти рекомендуемую квартиру."
+            )
 
         price = apartment[4]
         area = apartment[3]
@@ -268,10 +297,12 @@ class ApartmentAgent:
             "parking": parking
         }
 
-        # Если get_complexes_for_filters()
-        # дополнительно возвращает количество квартир
+        # Если get_complexes_for_filters() дополнительно возвращает изображение и количество квартир
         if len(complex_data) > 8:
-            result["apartments_count"] = complex_data[8]
+            result["image"] = complex_data[8]
+
+        if len(complex_data) > 9:
+            result["apartments_count"] = complex_data[9]
 
         return result
 
@@ -393,12 +424,10 @@ class ApartmentAgent:
         """Обрабатывает выбор квартир."""
 
         if not self.last_apartments:
-            return {
-                "type": "error",
-                "message": (
-                    "Сначала нужно выполнить поиск квартир."
-                )
-            }
+            return make_error(
+                "INVALID_REQUEST",
+                "Сначала нужно выполнить поиск квартир."
+            )
 
         selected = parse_apartment_selection(
             user_text,
@@ -406,17 +435,19 @@ class ApartmentAgent:
         )
 
         if not selected:
-            return {
-                "type": "error",
-                "message": (
-                    "Не удалось определить, "
-                    "какие квартиры вы выбрали."
-                )
-            }
+            return make_error(
+                "INVALID_REQUEST",
+                "Не удалось определить, какие квартиры вы выбрали."
+            )
 
-        self.selected_apartments = selected
+        
+        for apartment in selected:
+            if apartment not in self.selected_apartments:
+                self.selected_apartments.append(apartment)
 
-        self.last_selected_apartment = selected[-1]
+        self.last_selected_apartment = (
+            self.selected_apartments[-1]
+        )
 
         return {
             "type": "selection",
@@ -441,12 +472,10 @@ class ApartmentAgent:
         """Обрабатывает выбор ЖК."""
 
         if not self.last_complexes:
-            return {
-                "type": "error",
-                "message": (
-                    "Сначала нужно получить список ЖК."
-                )
-            }
+            return make_error(
+                "INVALID_REQUEST",
+                "Сначала нужно получить список ЖК."
+            )
 
         selected = parse_complex_selection(
             user_text,
@@ -454,13 +483,10 @@ class ApartmentAgent:
         )
 
         if not selected:
-            return {
-                "type": "error",
-                "message": (
-                    "Не удалось определить, "
-                    "какие ЖК вы выбрали."
-                )
-            }
+            return make_error(
+                "INVALID_REQUEST",
+                "Не удалось определить, какие ЖК вы выбрали."
+            )
 
         self.selected_complex_ids = [
             complex_data[0]
@@ -628,12 +654,10 @@ class ApartmentAgent:
         )
 
         if not complexes:
-            return {
-                "type": "error",
-                "message": (
-                    "Не удалось найти выбранные ЖК."
-                )
-            }
+            return make_error(
+                "COMPLEX_NOT_FOUND",
+                "Не удалось найти выбранные ЖК."
+            )
 
         criterion = compare_complexes_by_criterion(
             user_text,
@@ -648,6 +672,276 @@ class ApartmentAgent:
                 complexes
             )
         }
+
+
+    # --------------------------------------------------
+    # Бронирование
+    # --------------------------------------------------
+
+    def _start_booking(self):
+        """Начинает процесс бронирования выбранной квартиры."""
+
+        if not self.last_selected_apartment:
+            return make_error(
+                "INVALID_REQUEST",
+                "Сначала выберите квартиру."
+            )
+
+        apartment_id = self.last_selected_apartment[0]
+
+        # Получаем актуальное состояние квартиры из базы.
+        apartment = get_apartment_by_id(apartment_id)
+
+        if apartment is None:
+            return make_error(
+                "APARTMENT_NOT_FOUND",
+                "Квартира не найдена."
+            )
+
+        # Обновляем квартиру в памяти агента.
+        self.last_selected_apartment = apartment
+
+        # Если квартира уже забронирована,
+        # не предлагаем повторно выбрать тип брони.
+        if apartment[9] == "booked":
+            return {
+                "type": "booking",
+                "message": "Эта квартира уже забронирована.",
+                "apartment": self._apartment_to_dict(apartment)
+            }
+
+        self.pending_booking_apartment = apartment
+        self.booking_step = "type"
+
+        price_formatted = f"{apartment[4]:,.0f}".replace(",", " ")
+
+        return {
+            "type": "booking",
+            "message": (
+                f"Вы хотите забронировать квартиру №{apartment[0]} "
+                f"стоимостью {price_formatted} ₽.\n\n"
+                "Выберите тип бронирования:\n"
+                "1. Бесплатная бронь — 3 часа, 0 ₽.\n"
+                "2. Длительная бронь — 1 месяц, 20 000 ₽."
+            ),
+            "apartment": self._apartment_to_dict(apartment),
+            "booking_options": [
+                {
+                    "type": "free",
+                    "duration": "3 часа",
+                    "price": 0
+                },
+                {
+                    "type": "paid",
+                    "duration": "1 месяц",
+                    "price": 20000
+                }
+            ]
+        }
+
+
+    def _process_booking(self, user_text):
+        """Обрабатывает выбор типа бронирования и оплату."""
+
+        if not self.pending_booking_apartment:
+            self.booking_step = None
+
+            return {
+                "type": "error",
+                "message": (
+                    "Сначала выберите квартиру, "
+                    "которую хотите забронировать."
+                )
+            }
+
+        text_lower = user_text.lower()
+
+        # Отмена бронирования
+        cancel_phrases = (
+            "отмена",
+            "отменить",
+            "передумал",
+            "передумала",
+            "не хочу бронировать",
+            "не хочу оплачивать",
+            "не хочу платить"
+        )
+
+        if any(phrase in text_lower for phrase in cancel_phrases):
+            self.booking_step = None
+            self.pending_booking_apartment = None
+
+            return {
+                "type": "booking_cancelled",
+                "message": "Хорошо, бронирование отменено."
+            }
+
+
+        # Выбор типа бронирования
+        if self.booking_step == "type":
+
+            # Бесплатная бронь
+            if (
+                "бесплат" in text_lower
+                or "3 часа" in text_lower
+                or text_lower in ["1", "первый", "первый вариант"]
+            ):
+
+                apartment_id = (
+                    self.pending_booking_apartment[0]
+                )
+
+                result = book_apartment(
+                    apartment_id,
+                    "free"
+                )
+
+                if result["success"]:
+
+                    updated_apartment = get_apartment_by_id(
+                        apartment_id
+                    )
+
+                    self.last_selected_apartment = (
+                        updated_apartment
+                    )
+
+                    self.booking_step = None
+                    self.pending_booking_apartment = None
+
+                    return {
+                        "type": "booking",
+                        "message": result["message"],
+                        "booking": result,
+                        "apartment": self._apartment_to_dict(
+                            self.last_selected_apartment
+                        )
+                    }
+
+                return {
+                    "type": "error",
+                    "message": result["message"]
+                }
+
+            # Платная бронь
+            if (
+                "месяц" in text_lower
+                or "платн" in text_lower
+                or "длитель" in text_lower
+                or "20" in text_lower
+                or text_lower in ["2", "второй", "второй вариант"]
+            ):
+
+                self.booking_step = "payment"
+
+                return {
+                    "type": "payment",
+                    "message": (
+                        "Для бронирования на 1 месяц "
+                        "необходимо оплатить 20 000 ₽.\n\n"
+                        "Это демонстрационная оплата — "
+                        "реальные деньги не списываются.\n\n"
+                        "Подтвердить оплату?"
+                    ),
+                    "amount": 20000,
+                    "apartment": self._apartment_to_dict(
+                        self.pending_booking_apartment
+                    ),
+                    "payment_status": "pending"
+                }
+
+            return {
+                "type": "clarification",
+                "message": (
+                    "Выберите тип бронирования:\n"
+                    "1. Бесплатная бронь — 3 часа, 0 ₽.\n"
+                    "2. Длительная бронь — 1 месяц, 20 000 ₽."
+                )
+            }
+
+        # --------------------------------------------------
+        # Подтверждение демонстрационной оплаты
+        # --------------------------------------------------
+
+        if self.booking_step == "payment":
+
+            if (
+                "да" in text_lower
+                or "оплат" in text_lower
+                or "подтвержда" in text_lower
+                or "готов" in text_lower
+                or text_lower in ["1", "подтвердить"]
+            ):
+
+                apartment_id = (
+                    self.pending_booking_apartment[0]
+                )
+
+                result = book_apartment(
+                    apartment_id,
+                    "paid"
+                )
+
+                if result["success"]:
+
+                    updated_apartment = get_apartment_by_id(
+                        apartment_id
+                    )
+
+                    self.last_selected_apartment = (
+                        updated_apartment
+                    )
+
+                    self.booking_step = None
+                    self.pending_booking_apartment = None
+
+                    return {
+                        "type": "booking",
+                        "message": (
+                            "Оплата прошла успешно.\n\n"
+                            + result["message"]
+                        ),
+                        "booking": result,
+                        "payment_status": "success",
+                        "apartment": self._apartment_to_dict(
+                            self.last_selected_apartment
+                        )
+                    }
+
+                self.booking_step = None
+                self.pending_booking_apartment = None
+
+                return {
+                    "type": "error",
+                    "message": result["message"]
+                }
+
+            if (
+                "нет" in text_lower
+                or "отмен" in text_lower
+                or "не хочу" in text_lower
+            ):
+
+                self.booking_step = None
+                self.pending_booking_apartment = None
+
+                return {
+                    "type": "booking",
+                    "message": "Бронирование отменено.",
+                    "payment_status": "cancelled"
+                }
+
+            return {
+                "type": "payment",
+                "message": (
+                    "Подтвердить демонстрационную оплату "
+                    "20 000 ₽?\n"
+                    "Реальные деньги не списываются."
+                ),
+                "amount": 20000,
+                "payment_status": "pending"
+            }
+
 
     # --------------------------------------------------
     # Информация о квартире
@@ -677,6 +971,44 @@ class ApartmentAgent:
             )
         }
 
+
+    def _apartment_complex_information(self, user_text):
+        """Возвращает информацию о ЖК выбранной квартиры."""
+
+        if not self.last_selected_apartment:
+            return {
+                "type": "error",
+                "message": "Сначала выберите квартиру."
+            }
+
+        apartment = self.last_selected_apartment
+
+        complex_id = apartment[1]
+
+        complex_data = get_complex_by_id(complex_id)
+
+        if not complex_data:
+            return make_error(
+                "INTERNAL_ERROR",
+                "Не удалось найти ЖК этой квартиры."
+            )
+
+        answer = generate_information_answer(
+            user_text,
+            complex_data
+        )
+
+        return {
+            "type": "information",
+            "message": answer,
+            "complex": self._complex_to_dict(
+                complex_data
+            ),
+            "apartment": self._apartment_to_dict(
+                apartment
+            )
+        }
+
     # --------------------------------------------------
     # Информация о ЖК
     # --------------------------------------------------
@@ -698,25 +1030,21 @@ class ApartmentAgent:
                 )
 
         if target_id is None:
-            return {
-                "type": "error",
-                "message": (
-                    "Не удалось определить, "
-                    "о каком ЖК идёт речь."
-                )
-            }
+            return make_error(
+                "INVALID_REQUEST",
+                "Не удалось определить, "
+                "о каком ЖК идёт речь."
+            )
 
         complex_data = get_complex_by_id(
             target_id
         )
 
         if not complex_data:
-            return {
-                "type": "error",
-                "message": (
-                    "Не удалось найти этот ЖК."
-                )
-            }
+            return make_error(
+                "COMPLEX_NOT_FOUND",
+                "Не удалось найти этот ЖК."
+            )
 
         answer = generate_information_answer(
             user_text,
@@ -795,21 +1123,79 @@ class ApartmentAgent:
         user_text = user_text.strip()
 
         if not user_text:
-            return {
-                "type": "error",
-                "message": "Пустой запрос."
-            }
+            return make_error("EMPTY_MESSAGE")
 
         self.last_user_request = user_text
+
+        text_lower = user_text.lower()
+
+        # --------------------------------------------------
+        # Бронирование
+        # --------------------------------------------------
+
+        if self.booking_step is not None:
+            return self._process_booking(user_text)
+
+        if (
+            "забронировать" in text_lower
+            or "бронь" in text_lower
+            or "бронировать" in text_lower
+        ):
+            return self._start_booking()
+
+        # --------------------------------------------------
+        # Явный выбор квартиры
+        # --------------------------------------------------
+
+        if self.last_apartments:
+            apartment_selection = parse_apartment_selection(
+                user_text,
+                self.last_apartments
+            )
+
+            if apartment_selection:
+
+                self.selected_apartments = apartment_selection
+
+                self.last_selected_apartment = (
+                    apartment_selection[-1]
+                )
+
+                self.last_context_type = "apartment"
+
+                wants_details = (
+                    "расскажи" in text_lower
+                    or "подробнее" in text_lower
+                    or "информац" in text_lower
+                    or "характеристик" in text_lower
+                    or "что за квартира" in text_lower
+                )
+
+                if wants_details:
+                    return self._apartment_information()
+
+                return {
+                    "type": "selection",
+                    "message": "Квартира выбрана.",
+                    "apartments": (
+                        self._apartments_to_dict(
+                            apartment_selection
+                        )
+                    ),
+                    "selected_apartment_ids": [
+                        apartment[0]
+                        for apartment in apartment_selection
+                    ]
+                }
 
         intent = detect_intent(
             user_text,
             self.last_complexes
         )
 
-    # --------------------------------------------------
-    # Менеджер
-    # --------------------------------------------------
+        # --------------------------------------------------
+        # Менеджер
+        # --------------------------------------------------
 
         if intent == "manager":
 
@@ -825,19 +1211,62 @@ class ApartmentAgent:
                 )
             }
 
-    # --------------------------------------------------
-    # Другие варианты
-    # --------------------------------------------------
+        # --------------------------------------------------
+        # Другие варианты
+        # --------------------------------------------------
 
         if intent == "alternative":
 
+            parsed = parse_user_request(
+                user_text,
+                self.current_filters
+            )
+
+            updates = parsed.get(
+                "updates",
+                {}
+            )
+
+            clear_fields = parsed.get(
+                "clear_fields",
+                []
+            )
+
+            # Если пользователь одновременно изменил фильтры — сначала обновляем их
+            if updates or clear_fields:
+
+                for field, value in updates.items():
+
+                    if field in self.current_filters:
+                        self.current_filters[field] = value
+
+                for field in clear_fields:
+
+                    if field in self.current_filters:
+                        self.current_filters[field] = None
+
+                # Если после изменения фильтров не хватает количества комнат, просим его указать
+                if not self._is_request_complete():
+
+                    return {
+                        "type": "clarification",
+                        "message": (
+                            "Скажите, сколько комнат "
+                            "вам нужно."
+                        ),
+                        "filters": (
+                            self.current_filters.copy()
+                        )
+                    }
+
+                return self._search()
+
+            # Если новых фильтров нет, действительно нужны просто альтернативы.
             return self._alternatives()
 
-    # --------------------------------------------------
-    # Объяснение рекомендации
-    # --------------------------------------------------
-
-        text_lower = user_text.lower()
+        # --------------------------------------------------
+        # Объяснение рекомендации
+        # --------------------------------------------------
 
         if (
             "почему" in text_lower
@@ -853,42 +1282,57 @@ class ApartmentAgent:
 
             return self._explain_recommendation()
 
-    # --------------------------------------------------
-    # Явный выбор ЖК
-    # --------------------------------------------------
+        # --------------------------------------------------
+        # Явный выбор ЖК
+        # --------------------------------------------------
 
         if is_complex_reference_request(user_text):
+
             selected_ids = parse_complex_selection(
                 user_text,
                 self.last_complexes
             )
 
             if selected_ids:
+
                 selected = [
                     complex_data
                     for complex_data in self.last_complexes
                     if complex_data[0] in selected_ids
                 ]
 
-                self.selected_complex_ids = [
-                    complex_data[0]
-                    for complex_data in selected
-                ]
+                if selected:
 
-                self.last_selected_complex_id = selected[-1][0]
-                self.last_context_type = "complex"
+                    self.selected_complex_ids = [
+                        complex_data[0]
+                        for complex_data in selected
+                    ]
 
-                return {
-                    "type": "selection",
-                    "message": "Жилые комплексы выбраны.",
-                    "complexes": self._complexes_to_dict(selected),
-                    "selected_complex_ids": self.selected_complex_ids.copy(),
-                    "selected_apartment_ids": []
-                }
+                    self.last_selected_complex_id = (
+                        selected[-1][0]
+                    )
 
-    # --------------------------------------------------
-    # Ссылка на последний контекст
-    # --------------------------------------------------
+                    self.last_context_type = "complex"
+
+                    return {
+                        "type": "selection",
+                        "message": (
+                            "Жилые комплексы выбраны."
+                        ),
+                        "complexes": (
+                            self._complexes_to_dict(
+                                selected
+                            )
+                        ),
+                        "selected_complex_ids": (
+                            self.selected_complex_ids.copy()
+                        ),
+                        "selected_apartment_ids": []
+                    }
+
+        # --------------------------------------------------
+        # Ссылка на последний контекст
+        # --------------------------------------------------
 
         if (
             is_context_reference_request(user_text)
@@ -907,11 +1351,28 @@ class ApartmentAgent:
 
                 if selected:
 
-                    self.selected_apartments = selected
+                    for apartment in selected:
+                        if apartment not in self.selected_apartments:
+                            self.selected_apartments.append(
+                                apartment
+                            )
 
                     self.last_selected_apartment = (
-                        selected[-1]
+                        self.selected_apartments[-1]
                     )
+
+                    # Если пользователь одновременно
+                    # выбрал квартиру и попросил рассказать о ней
+                    wants_details = (
+                        "расскажи" in text_lower
+                        or "подробнее" in text_lower
+                        or "информац" in text_lower
+                        or "характеристик" in text_lower
+                        or "что за квартира" in text_lower
+                    )
+
+                    if wants_details:
+                        return self._apartment_information()
 
                     return {
                         "type": "selection",
@@ -947,7 +1408,9 @@ class ApartmentAgent:
 
                     return {
                         "type": "selection",
-                        "message": "Жилые комплексы выбраны.",
+                        "message": (
+                            "Жилые комплексы выбраны."
+                        ),
                         "complexes": (
                             self._complexes_to_dict(
                                 selected
@@ -958,16 +1421,36 @@ class ApartmentAgent:
                         )
                     }
 
-    # --------------------------------------------------
-    # Информация
-    # --------------------------------------------------
+        # --------------------------------------------------
+        # Информация
+        # --------------------------------------------------
 
         if intent == "information":
 
+            # Если пользователь явно спрашивает про ЖК
+            # выбранной квартиры
             if (
                 self.last_selected_apartment
-                and is_last_object_reference(
+                and (
+                    "что это за жк" in text_lower
+                    or "какой жк" in text_lower
+                    or "что за жк" in text_lower
+                    or "жилой комплекс" in text_lower
+                )
+            ):
+
+                return self._apartment_complex_information(
                     user_text
+                )
+
+            # Если уже выбрана квартира и пользователь
+            # говорит о ней через контекст
+            if (
+                self.last_selected_apartment
+                and (
+                    is_last_object_reference(user_text)
+                    or "квартир" in text_lower
+                    or "вариант" in text_lower
                 )
             ):
 
@@ -977,19 +1460,36 @@ class ApartmentAgent:
                 user_text
             )
 
-    # --------------------------------------------------
-    # Выбор квартиры
-    # --------------------------------------------------
+        # --------------------------------------------------
+        # Выбор квартиры
+        # --------------------------------------------------
 
         if intent == "apartment":
 
-            return self._select_apartments(
+            selected_result = self._select_apartments(
                 user_text
             )
 
-    # --------------------------------------------------
-    # Сравнение
-    # --------------------------------------------------
+            wants_details = (
+                "расскажи" in text_lower
+                or "подробнее" in text_lower
+                or "информац" in text_lower
+                or "характеристик" in text_lower
+                or "что за квартира" in text_lower
+            )
+
+            if (
+                selected_result.get("type") == "selection"
+                and wants_details
+            ):
+
+                return self._apartment_information()
+
+            return selected_result
+
+        # --------------------------------------------------
+        # Сравнение
+        # --------------------------------------------------
 
         if intent == "comparison":
 
@@ -997,10 +1497,33 @@ class ApartmentAgent:
                 self.selected_apartments
                 and len(self.selected_apartments) >= 2
             ):
-
+                
                 return self._compare_apartments(
                     user_text
                 )
+
+            # Если ЖК ещё не были выбраны, попробуем определить их прямо из сообщения.
+            if not self.selected_complex_ids:
+
+                complexes_for_selection = self.last_complexes
+
+                # Если до этого список ЖК не был получен,
+                # берём все ЖК из базы.
+                if not complexes_for_selection:
+                    complexes_for_selection = get_all_complexes()
+
+                selected_ids = parse_complex_selection(
+                    user_text,
+                    complexes_for_selection
+                )
+
+                if len(selected_ids) >= 2:
+
+                    self.selected_complex_ids = selected_ids
+
+                    self.last_selected_complex_id = selected_ids[-1]
+
+                    self.last_context_type = "complex"
 
             if self.selected_complex_ids:
 
@@ -1016,9 +1539,9 @@ class ApartmentAgent:
                 )
             }
 
-    # --------------------------------------------------
-    # Изменение фильтров / поиск
-    # --------------------------------------------------
+        # --------------------------------------------------
+        # Изменение фильтров / поиск
+        # --------------------------------------------------
 
         if intent == "filter":
 
@@ -1037,7 +1560,7 @@ class ApartmentAgent:
                 []
             )
 
-        # Применяем найденные изменения.
+            # Применяем найденные изменения
             for field, value in updates.items():
 
                 if field in self.current_filters:
@@ -1048,7 +1571,8 @@ class ApartmentAgent:
                 if field in self.current_filters:
                     self.current_filters[field] = None
 
-        # Если параметров недостаточно, просим пользователя уточнить количество комнат.
+            # Если параметров недостаточно,
+            # просим пользователя уточнить количество комнат
             if not self._is_request_complete():
 
                 return {
@@ -1062,12 +1586,13 @@ class ApartmentAgent:
                     )
                 }
 
-        # Если параметры уже полные, выполняем поиск.
+            # Если параметры уже полные,
+            # выполняем поиск
             return self._search()
 
-    # --------------------------------------------------
-    # Неизвестный запрос
-    # --------------------------------------------------
+        # --------------------------------------------------
+        # Неизвестный запрос
+        # --------------------------------------------------
 
         return {
             "type": "clarification",
@@ -1078,3 +1603,20 @@ class ApartmentAgent:
             )
         }
 
+if __name__ == "__main__":
+    agent = ApartmentAgent()
+
+    print("Агент запущен. Напишите сообщение.")
+    print("Для выхода введите: выход")
+
+    while True:
+        user_text = input("\nВы: ")
+
+        if user_text.lower() == "выход":
+            print("Агент завершил работу.")
+            break
+
+        result = agent.process_message(user_text)
+
+        print("\nАгент:")
+        print(result)

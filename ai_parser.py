@@ -76,6 +76,7 @@ def parse_user_request(user_text, current_filters=None):
         (2, r"\bдвухкомнатн\w*\b"),
         (2, r"\b2[- ]?комнатн\w*\b"),
         (3, r"\bтрешк\w*\b"),
+        (3, r"\bтрёшк\w*\b"),
         (3, r"\bтрехкомнатн\w*\b"),
         (3, r"\bтрёхкомнатн\w*\b"),
         (3, r"\b3[- ]?комнатн\w*\b"),
@@ -433,6 +434,27 @@ def parse_apartment_selection(user_text, apartments):
                     selected.append(apartment)
 
     # --------------------------------------------------
+    # 1.5. Выбор по номеру варианта
+    # --------------------------------------------------
+
+    variant_matches = re.findall(
+        r"\b(?:вариант|варианта|варианту)\s*(?:№|#)?\s*(\d+)",
+        text
+    )
+
+    for number_text in variant_matches:
+
+        number = int(number_text)
+        index = number - 1
+
+        if 0 <= index < len(apartments):
+
+            apartment = apartments[index]
+
+            if apartment not in selected:
+                selected.append(apartment)
+
+    # --------------------------------------------------
     # 2. Выбор по ID
     # --------------------------------------------------
 
@@ -442,7 +464,7 @@ def parse_apartment_selection(user_text, apartments):
     )
 
     # --------------------------------------------------
-    # 3. Выбор по фразе "квартира 13"
+    # 3. Выбор по фразе "квартира 3"
     # --------------------------------------------------
 
     apartment_matches = re.findall(
@@ -450,10 +472,20 @@ def parse_apartment_selection(user_text, apartments):
         text
     )
 
-    id_matches.extend(apartment_matches)
+    for number_text in apartment_matches:
+
+        number = int(number_text)
+        index = number - 1
+
+        if 0 <= index < len(apartments):
+
+            apartment = apartments[index]
+
+            if apartment not in selected:
+                selected.append(apartment)
 
     # --------------------------------------------------
-    # 4. Находим квартиры по ID
+    # 4. Находим квартиры по явному ID
     # --------------------------------------------------
 
     for apartment_id_text in id_matches:
@@ -505,6 +537,21 @@ def parse_complex_selection(user_text, complexes):
         if result:
             return result
 
+    # Если пользователь явно указал название ЖК, определяем его напрямую, без GigaChat.
+    lower_text = user_text.lower()
+
+    exact_name_matches = []
+
+    for complex_data in complexes:
+        complex_id = complex_data[0]
+        name = complex_data[1]
+
+        if name.lower() in lower_text:
+            exact_name_matches.append(complex_id)
+
+    if exact_name_matches:
+        return exact_name_matches
+
     complex_names = [complex_data[1] for complex_data in complexes]
 
     prompt = f"""
@@ -544,6 +591,7 @@ def parse_complex_selection(user_text, complexes):
 
     if answer:
         try:
+
             answer = answer.strip()
             answer = re.sub(r"^```json", "", answer)
             answer = re.sub(r"^```", "", answer)
@@ -630,6 +678,9 @@ def is_comparison_request(user_text):
 
     text = user_text.lower().strip()
 
+    if "парковк" in text:
+        return True
+
     phrases = [
         # Общее сравнение
         "сравни",
@@ -667,6 +718,9 @@ def is_comparison_request(user_text):
         "какой из них раньше сдастся",
         "какой из них раньше сдается",
         "какой из них раньше сдаётся",
+        "какой из них сдастся раньше",
+        "какой из них сдается раньше",
+        "какой из них сдаётся раньше",
 
         # Класс
         "какой класс выше",
@@ -831,6 +885,7 @@ def compare_apartments_by_criterion(
             "какой этаж выше",
             "у кого этаж выше",
             "какая квартира выше",
+            "какая из них выше",
             "кто выше"
         ]
     ):
@@ -1345,6 +1400,12 @@ def detect_comparison_topic(user_text):
         "где есть подземная парковка",
         "у кого есть подземная парковка",
         "в каком жк есть подземная парковка",
+        "где парковка лучше",
+        "у кого парковка лучше",
+        "какая парковка лучше",
+        "где лучше по парковке",
+        "у кого лучше по парковке",
+        "а парковка",
     ]
 
     if any(phrase in text for phrase in parking_phrases):
@@ -1359,6 +1420,12 @@ def detect_comparison_topic(user_text):
         "позже сда",
         "когда будет сдан",
         "когда сдадут",
+        "сдастся раньше",
+        "сдается раньше",
+        "сдаётся раньше",
+        "сдастся раньше",
+        "сдается раньше",
+        "сдаётся раньше",
     ]
 
     if any(phrase in text for phrase in completion_phrases):
@@ -1427,7 +1494,8 @@ def compare_complexes_by_criterion(user_text, complex_data):
                 completion_year,
                 description,
                 infrastructure,
-                parking
+                parking,
+                *extra
             ) = complex_item
 
             items = [
@@ -1497,7 +1565,8 @@ def compare_complexes_by_criterion(user_text, complex_data):
                 completion_year,
                 description,
                 infrastructure,
-                parking
+                parking,
+                *extra
             ) = complex_item
 
             result.append(
@@ -1540,7 +1609,8 @@ def compare_complexes_by_criterion(user_text, complex_data):
                 completion_year,
                 description,
                 infrastructure,
-                parking
+                parking,
+                *extra
             ) = complex_item
 
             result.append(
@@ -1566,11 +1636,12 @@ def compare_complexes_by_criterion(user_text, complex_data):
             )
         else:
             result.append(
-                f"\nРаньше всего планируется сдача у "
-                f"{', '.join(leaders)} — в {earliest_year} году."
+                f"\nОба ЖК планируется сдать "
+                f"в {earliest_year} году."
             )
 
         return "\n".join(result)
+
 
     # ---------------------------------------------------------
     # КЛАСС
@@ -1581,6 +1652,16 @@ def compare_complexes_by_criterion(user_text, complex_data):
             "Сравнение по критерию «Класс жилья»:\n"
         ]
 
+        class_order = {
+            "эконом": 1,
+            "комфорт": 2,
+            "комфорт+": 3,
+            "бизнес": 4,
+            "премиум": 5
+        }
+
+        classes = []
+
         for complex_item in complex_data:
             (
                 complex_id,
@@ -1590,12 +1671,64 @@ def compare_complexes_by_criterion(user_text, complex_data):
                 completion_year,
                 description,
                 infrastructure,
-                parking
+                parking,
+                *extra
             ) = complex_item
 
             result.append(
                 f"{name} — {housing_class}"
             )
+
+            classes.append((name, housing_class))
+
+        # Определяем уровень класса
+        ranked_classes = []
+
+        for name, housing_class in classes:
+            normalized_class = housing_class.lower().strip()
+
+            if normalized_class in class_order:
+                ranked_classes.append(
+                    (
+                        name,
+                        housing_class,
+                        class_order[normalized_class]
+                    )
+                )
+
+        if ranked_classes:
+            max_level = max(
+                level
+                for name, housing_class, level in ranked_classes
+            )
+
+            leaders = [
+                name
+                for name, housing_class, level in ranked_classes
+                if level == max_level
+            ]
+
+            if len(leaders) == len(ranked_classes):
+                result.append(
+                    f"\nВсе выбранные ЖК относятся к классу "
+                    f"«{ranked_classes[0][1]}»."
+                )
+            elif len(leaders) == 1:
+                winner_class = next(
+                    housing_class
+                    for name, housing_class, level in ranked_classes
+                    if name == leaders[0]
+                )
+
+                result.append(
+                    f"\nВыше классом — {leaders[0]} "
+                    f"({winner_class})."
+                )
+            else:
+                result.append(
+                    f"\nСамый высокий класс среди выбранных ЖК: "
+                    f"{', '.join(leaders)}."
+                )
 
         return "\n".join(result)
 
@@ -1617,7 +1750,8 @@ def compare_complexes_by_criterion(user_text, complex_data):
                 completion_year,
                 description,
                 infrastructure,
-                parking
+                parking,
+                *extra
             ) = complex_item
 
             result.append(
@@ -1660,7 +1794,8 @@ def generate_information_answer(user_text, complex_data):
         completion_year,
         description,
         infrastructure,
-        parking
+        parking,
+        *extra
     ) = complex_data
 
     topic = detect_information_topic(user_text)
@@ -1942,9 +2077,6 @@ def parse_context_selection(user_text, items):
 def is_complex_reference_request(user_text):
     text = user_text.lower().strip()
 
-    if re.search(r"\bжк\s*№?\s*\d+\b", text):
-        return True
-    
     # Выбор ЖК по номеру:
     # "ЖК 1", "ЖК №1", "жк 1 и жк 5"
     if re.search(r"\bжк\s*№?\s*\d+\b", text):
@@ -1962,7 +2094,15 @@ def is_complex_reference_request(user_text):
         "десятый жилой комплекс"
     ]
 
-    return any(phrase in text for phrase in phrases)
+    if any(phrase in text for phrase in phrases):
+        return True
+
+    # Обращение к ЖК по его названию.
+    # Например: "ЖК Лесной", "посмотрим ЖК Солнечный"
+    if re.search(r"\bжк\s+[а-яёa-z0-9][а-яёa-z0-9\s-]*", text):
+        return True
+
+    return False
 
 
 def is_last_object_reference(user_text):
