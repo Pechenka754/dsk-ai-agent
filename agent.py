@@ -642,7 +642,7 @@ class ApartmentAgent:
 
         if len(self.selected_complex_ids) < 2:
             return {
-                "type": "error",
+                "type": "clarification",
                 "message": (
                     "Для сравнения нужно выбрать "
                     "как минимум два ЖК."
@@ -746,13 +746,10 @@ class ApartmentAgent:
         if not self.pending_booking_apartment:
             self.booking_step = None
 
-            return {
-                "type": "error",
-                "message": (
-                    "Сначала выберите квартиру, "
-                    "которую хотите забронировать."
-                )
-            }
+            return make_error(
+                "INVALID_REQUEST",
+                "Сначала выберите квартиру, которую хотите забронировать."
+            )
 
         text_lower = user_text.lower()
 
@@ -818,10 +815,10 @@ class ApartmentAgent:
                         )
                     }
 
-                return {
-                    "type": "error",
-                    "message": result["message"]
-                }
+                return make_error(
+                    "BOOKING_UNAVAILABLE",
+                    result["message"]
+                )
 
             # Платная бронь
             if (
@@ -911,11 +908,11 @@ class ApartmentAgent:
                 self.booking_step = None
                 self.pending_booking_apartment = None
 
-                return {
-                    "type": "error",
-                    "message": result["message"]
-                }
-
+                return make_error(
+                    "BOOKING_UNAVAILABLE",
+                    result["message"]
+                )
+            
             if (
                 "нет" in text_lower
                 or "отмен" in text_lower
@@ -951,12 +948,10 @@ class ApartmentAgent:
         """Возвращает подробную информацию о квартире."""
 
         if not self.last_selected_apartment:
-            return {
-                "type": "error",
-                "message": (
-                    "Сначала выберите квартиру."
-                )
-            }
+            return make_error(
+                "INVALID_REQUEST",
+                "Сначала выберите квартиру."
+            )
 
         apartment = self.last_selected_apartment
 
@@ -976,10 +971,10 @@ class ApartmentAgent:
         """Возвращает информацию о ЖК выбранной квартиры."""
 
         if not self.last_selected_apartment:
-            return {
-                "type": "error",
-                "message": "Сначала выберите квартиру."
-            }
+            return make_error(
+                "INVALID_REQUEST",
+                "Сначала выберите квартиру."
+            )
 
         apartment = self.last_selected_apartment
 
@@ -1083,7 +1078,7 @@ class ApartmentAgent:
 
         if not alternatives:
             return {
-                "type": "error",
+                "type": "alternative",
                 "message": (
                     "Я показал все доступные "
                     "подходящие или наиболее близкие варианты."
