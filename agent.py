@@ -1011,9 +1011,16 @@ class ApartmentAgent:
     def _complex_information(self, user_text):
         """Возвращает информацию о ЖК."""
 
+        complexes_for_search = self.last_complexes
+
+        # Если список ЖК ещё не получен,
+        # ищем среди всех ЖК из базы.
+        if not complexes_for_search:
+            complexes_for_search = get_all_complexes()
+
         target_id = find_information_target(
             user_text,
-            self.last_complexes
+            complexes_for_search
         )
 
         if target_id is None:
@@ -1172,11 +1179,14 @@ class ApartmentAgent:
                 return {
                     "type": "selection",
                     "message": "Квартира выбрана.",
+                    "filters": self.current_filters.copy(),
+                    "complexes": [],
                     "apartments": (
                         self._apartments_to_dict(
                             apartment_selection
                         )
                     ),
+                    "selected_complex_ids": [],
                     "selected_apartment_ids": [
                         apartment[0]
                         for apartment in apartment_selection
@@ -1283,10 +1293,15 @@ class ApartmentAgent:
 
         if is_complex_reference_request(user_text):
 
+            print("DEBUG last_complexes:", self.last_complexes)
+            print("DEBUG user_text:", user_text)
+
             selected_ids = parse_complex_selection(
                 user_text,
                 self.last_complexes
             )
+
+            print("DEBUG selected_ids:", selected_ids)
 
             if selected_ids:
 
@@ -1314,11 +1329,13 @@ class ApartmentAgent:
                         "message": (
                             "Жилые комплексы выбраны."
                         ),
+                        "filters": self.current_filters.copy(),
                         "complexes": (
                             self._complexes_to_dict(
                                 selected
                             )
                         ),
+                        "apartments": [],
                         "selected_complex_ids": (
                             self.selected_complex_ids.copy()
                         ),
